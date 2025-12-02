@@ -7,42 +7,42 @@ import gdown
 import os
 from datetime import datetime
 
-# ---------- BASIC STYLING ----------
+# ---------- PAGE CONFIG ----------
 st.set_page_config(
     page_title="Brain MRI Tumor Detection",
     page_icon="🧠",
     layout="wide",
 )
 
-# Optional custom CSS for nicer medical UI
+# ---------- LIGHT HOSPITAL THEME ----------
 st.markdown(
     """
     <style>
-    .main {
-        background-color: #0B1020;
-        color: #F5F5F5;
-    }
     .stApp {
-        background-color: #0B1020;
+        background-color: #F5F7FB;
     }
     .big-title {
         font-size: 2.2rem;
         font-weight: 700;
         margin-bottom: 0.2rem;
+        color: #1F2937;
     }
     .subtitle {
         font-size: 0.95rem;
-        color: #D0D0D0;
+        color: #4B5563;
+        margin-bottom: 1rem;
     }
     .result-card {
         padding: 1rem;
         border-radius: 0.75rem;
-        background: #111829;
-        border: 1px solid #2F3A5C;
-        color: #E0E0E0;
+        background: #FFFFFF;
+        border: 1px solid #E5E7EB;
+        box-shadow: 0 4px 10px rgba(15, 23, 42, 0.08);
     }
-    .sidebar .sidebar-content {
-        background-color: #111829 !important;
+    .sidebar-title {
+        font-weight: 600;
+        font-size: 1rem;
+        color: #111827;
     }
     </style>
     """,
@@ -52,7 +52,7 @@ st.markdown(
 # ---------- CONFIG ----------
 IMG_SIZE = (224, 224)
 
-# Google Drive File IDs (YOURS ARE ALREADY SET)
+# Your Google Drive IDs (already correct)
 EFFICIENTNET_ID = "1kfLjAHoGbYNBg12gU-vr9rCsnVX-kCFG"
 MOBILENET_ID   = "1ARZryz9H5Bc832iRs2DiPyEjBL5BuNKR"
 
@@ -60,12 +60,12 @@ MODEL_CONFIG = {
     "EfficientNetB0": {
         "url": f"https://drive.google.com/uc?id={EFFICIENTNET_ID}",
         "filename": "efficientnet_finetuned.h5",
-        "description": "Accurate & robust model (EfficientNetB0).",
+        "description": "High-capacity CNN, very strong overall accuracy.",
     },
     "MobileNetV3": {
         "url": f"https://drive.google.com/uc?id={MOBILENET_ID}",
         "filename": "mobilenet_finetuned.h5",
-        "description": "Fast lightweight model (MobileNetV3).",
+        "description": "Lightweight CNN, fast inference. Main model for this project.",
     },
 }
 
@@ -78,16 +78,17 @@ CLASS_NAMES = [
 
 # ---------- SESSION STATE ----------
 if "history" not in st.session_state:
-    st.session_state["history"] = []
+    st.session_state["history"] = []  # list of dicts
 
-# ---------- FUNCTIONS ----------
+
+# ---------- MODEL HELPERS ----------
 def download_model_if_needed(model_name: str) -> str:
     cfg = MODEL_CONFIG[model_name]
     os.makedirs("models", exist_ok=True)
     model_path = os.path.join("models", cfg["filename"])
 
     if not os.path.exists(model_path):
-        with st.spinner(f"⬇️ Downloading {model_name} weights..."):
+        with st.spinner(f"Downloading {model_name} weights from Google Drive..."):
             gdown.download(cfg["url"], model_path, quiet=False)
 
     return model_path
@@ -95,176 +96,181 @@ def download_model_if_needed(model_name: str) -> str:
 
 @st.cache_resource
 def load_model(model_name: str):
-    path = download_model_if_needed(model_name)
-    model = tf.keras.models.load_model(path, compile=False)
-    model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+    """Load model from local path (download from Drive if needed)."""
+    model_path = download_model_if_needed(model_name)
+    # compile=False to avoid needing original training config
+    model = tf.keras.models.load_model(model_path, compile=False)
+    # optional compile for metrics usage
+    try:
+        model.compile(
+            optimizer="adam",
+            loss="categorical_crossentropy",
+            metrics=["accuracy"],
+        )
+    except Exception:
+        # some models may not need compile for inference
+        pass
     return model
 
 
-def preprocess_image(img: Image.Image) -> np.ndarray:
-    img = img.convert("RGB")
+def preprocess_image(image: Image.Image) -> np.ndarray:
+    """Same style as training: RGB -> resize -> /255."""
+    img = image.convert("RGB")
     img = img.resize(IMG_SIZE)
     arr = np.array(img).astype("float32") / 255.0
-    arr = np.expand_dims(arr, 0)
+    arr = np.expand_dims(arr, axis=0)
     return arr
 
 
-def predict(model_name: str, img: Image.Image):
+def predict(model_name: str, image: Image.Image):
+    """Run inference with selected model."""
     model = load_model(model_name)
-    x = preprocess_image(img)
+    x = preprocess_image(image)
     preds = model.predict(x)[0]
-    idx = np.argmax(preds)
-    return CLASS_NAMES[idx], preds[idx], preds
+    idx = int(np.argmax(preds))
+    label = CLASS_NAMES[idx]
+    confidence = float(preds[idx])
+    return label, confidence, preds
 
 
-# ---------- SIDEBAR TOOLBAR ----------
+# ---------- SIDEBAR (TOOLBAR) ----------
 with st.sidebar:
-    st.markdown("### 🧭 Control Panel")
+    st.markdown('<div class="sidebar-title">Control Panel</div>', unsafe_allow_html=True)
 
-    # Date & time expander like toolbar
-    with st.expander("🕒 Session Tools", expanded=True):
+    with st.expander("🕒 Session tools", expanded=True):
         now = datetime.now()
         st.write("**Date:**", now.strftime("%Y-%m-%d"))
         st.write("**Time:**", now.strftime("%H:%M:%S"))
-
-        if st.button("🧹 Clear History"):
+        if st.button("🧹 Clear prediction history"):
             st.session_state["history"] = []
-            st.success("History cleared!")
+            st.success("History cleared.")
 
     st.markdown("---")
 
-    # Model selector
+    # Default to MobileNetV3 (your main project model)
     model_choice = st.radio(
-        "Choose model",
-        list(MODEL_CONFIG.keys()),
-        index=0,
+        "Model selection",
+        options=list(MODEL_CONFIG.keys()),
+        index=1,  # 0 = EfficientNet, 1 = MobileNet
+        help="MobileNetV3 is the main model used in your project.",
     )
 
-    st.markdown("#### Model Info")
+    st.markdown("**Model description**")
     st.write(MODEL_CONFIG[model_choice]["description"])
 
     st.markdown("---")
-    st.markdown("Made with ❤️ by **Archana & Jaswanth**")
+    st.caption("Developed by Archana & Jaswanth – Brain MRI Tumor Detection")
 
 
 # ---------- HEADER ----------
-st.markdown('<div class="big-title">Brain MRI Tumor Detection Dashboard</div>', unsafe_allow_html=True)
+st.markdown('<div class="big-title">Brain MRI Tumor Detection</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">AI-powered medical image analysis using EfficientNetB0 & MobileNetV3.</div>',
+    '<div class="subtitle">Upload a brain MRI image and obtain tumor predictions using your '
+    'trained MobileNetV3 / EfficientNetB0 models.</div>',
     unsafe_allow_html=True,
 )
 
-st.write("")
-
-# ---------- MAIN TABS ----------
-tab_pred, tab_details, tab_training, tab_explain, tab_history = st.tabs(
-    ["🔮 Prediction", "ℹ️ Model Details", "📈 Training Metrics", "🔥 Explainability", "🕑 History"]
+# ---------- TABS ----------
+tab_pred, tab_details, tab_history = st.tabs(
+    ["🔮 Prediction", "ℹ️ Model Details", "🕑 Prediction History"]
 )
 
-# ==================== TAB 1: PREDICTION ======================
+# ===== TAB 1: PREDICTION =====
 with tab_pred:
-    col_left, col_right = st.columns([1.15, 1])
+    col_left, col_right = st.columns([1.2, 1])
 
+    # LEFT: Image upload
     with col_left:
-        uploaded = st.file_uploader("Upload Brain MRI (JPG/PNG)", ["jpg", "jpeg", "png"])
-        if uploaded:
-            img = Image.open(uploaded)
-            st.image(img, caption="Uploaded Image", use_column_width=True)
+        uploaded_file = st.file_uploader(
+            "Upload MRI image (JPG / PNG)",
+            type=["jpg", "jpeg", "png"],
+        )
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file)
+            st.image(image, caption="Uploaded MRI", use_column_width=True)
         else:
-            st.info("Upload an MRI image to begin.")
+            st.info("Please upload a brain MRI image to start.")
 
+    # RIGHT: Prediction card
     with col_right:
-        if uploaded and st.button("🔍 Run Prediction", type="primary", use_container_width=True):
-            with st.spinner("Analyzing MRI..."):
-                label, conf, probs = predict(model_choice, img)
+        st.markdown("#### Model Output")
 
-            # Save history
-            st.session_state["history"].append({
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "model": model_choice,
-                "prediction": label,
-                "confidence": round(conf * 100, 2),
-            })
+        if uploaded_file is not None:
+            if st.button("Run prediction", use_container_width=True):
+                try:
+                    with st.spinner("Running inference..."):
+                        label, conf, probs = predict(model_choice, image)
 
-            st.markdown('<div class="result-card">', unsafe_allow_html=True)
-            st.markdown(f"### 🧠 Predicted: **{label}**")
-            st.markdown(f"#### Confidence: **{conf*100:.2f}%**")
-            st.markdown(f"**Model:** {model_choice}")
-            st.markdown("</div>", unsafe_allow_html=True)
+                    # Save to history
+                    st.session_state["history"].append(
+                        {
+                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "model": model_choice,
+                            "prediction": label,
+                            "confidence": round(conf * 100, 2),
+                        }
+                    )
 
-            prob_df = pd.DataFrame({"Tumor Type": CLASS_NAMES, "Probability": probs})
-            prob_df["Probability (%)"] = (prob_df["Probability"] * 100).round(2)
-            prob_df = prob_df.set_index("Tumor Type")
+                    # Result card
+                    st.markdown('<div class="result-card">', unsafe_allow_html=True)
+                    st.markdown(f"**Model:** {model_choice}")
+                    st.markdown(f"**Predicted class:** `{label}`")
+                    st.markdown(f"**Confidence:** `{conf * 100:.2f}%`")
+                    st.markdown("</div>", unsafe_allow_html=True)
 
-            st.markdown("#### Probability Distribution")
-            st.dataframe(prob_df[["Probability (%)"]])
-            st.bar_chart(prob_df["Probability"])
+                    # Probability table + bar chart
+                    prob_df = pd.DataFrame(
+                        {"Tumor Type": CLASS_NAMES, "Probability": probs}
+                    )
+                    prob_df["Probability (%)"] = (
+                        prob_df["Probability"] * 100
+                    ).round(2)
+                    prob_df = prob_df.set_index("Tumor Type")
+
+                    st.markdown("##### Probability Distribution")
+                    st.dataframe(prob_df[["Probability (%)"]])
+                    st.bar_chart(prob_df["Probability"])
+
+                except Exception as e:
+                    st.error(
+                        f"Prediction failed for **{model_choice}**. "
+                        f"Technical error: {e}"
+                    )
         else:
-            st.info("Prediction will appear here after running the model.")
+            st.info("Prediction will appear here after you upload an image and click the button.")
 
-# ==================== TAB 2: MODEL DETAILS ======================
+# ===== TAB 2: MODEL DETAILS =====
 with tab_details:
-    st.markdown("### ℹ️ Model Details")
+    st.markdown("### Model Details")
     st.write(f"**Selected model:** `{model_choice}`")
     st.write(MODEL_CONFIG[model_choice]["description"])
 
-    st.markdown("#### Class Labels")
-    st.write(", ".join(CLASS_NAMES))
-
-    st.markdown("#### Input Info")
-    st.write(f"Input size: {IMG_SIZE[0]} × {IMG_SIZE[1]} RGB")
-
-# ==================== TAB 3: TRAINING METRICS ======================
-with tab_training:
-    st.markdown("### 📈 Training & Metrics (Upload images in assets/ folder)")
-
-    colA, colB = st.columns(2)
-
-    with colA:
-        st.markdown("#### EfficientNetB0")
-        try:
-            st.image("assets/efficientnet_training_curves.png")
-        except:
-            st.info("Upload assets/efficientnet_training_curves.png")
-
-        try:
-            st.image("assets/efficientnet_confusion_matrix.png")
-        except:
-            st.info("Upload assets/efficientnet_confusion_matrix.png")
-
-    with colB:
-        st.markdown("#### MobileNetV3")
-        try:
-            st.image("assets/mobilenet_training_curves.png")
-        except:
-            st.info("Upload assets/mobilenet_training_curves.png")
-
-        try:
-            st.image("assets/mobilenet_confusion_matrix.png")
-        except:
-            st.info("Upload assets/mobilenet_confusion_matrix.png")
-
-# ==================== TAB 4: EXPLAINABILITY ======================
-with tab_explain:
-    st.markdown("### 🔥 Explainability (Grad-CAM)")
-
     col1, col2 = st.columns(2)
     with col1:
-        try:
-            st.image("assets/gradcam/gradcam_example_1.png")
-        except:
-            st.info("Upload assets/gradcam/gradcam_example_1.png")
+        st.markdown("**Input size**")
+        st.write(f"{IMG_SIZE[0]} × {IMG_SIZE[1]} RGB")
+        st.markdown("**Number of classes**")
+        st.write(len(CLASS_NAMES))
+        st.markdown("**Classes**")
+        st.write(", ".join(CLASS_NAMES))
 
     with col2:
-        try:
-            st.image("assets/gradcam/gradcam_example_2.png")
-        except:
-            st.info("Upload assets/gradcam/gradcam_example_2.png")
+        st.markdown("**Prediction pipeline**")
+        st.markdown(
+            """
+            1. Read uploaded MRI image.  
+            2. Convert to RGB, resize to 224×224, normalize to [0, 1].  
+            3. Forward pass through the selected CNN (MobileNetV3 / EfficientNetB0).  
+            4. Apply softmax over 4 tumor classes.  
+            5. Display highest-probability class and full distribution.  
+            """
+        )
 
-# ==================== TAB 5: HISTORY ======================
+# ===== TAB 3: HISTORY =====
 with tab_history:
-    st.markdown("### 🕑 Prediction History")
+    st.markdown("### Prediction History (current session)")
     if len(st.session_state["history"]) == 0:
-        st.info("No predictions yet.")
+        st.info("No predictions yet. Run a prediction in the first tab.")
     else:
-        st.dataframe(pd.DataFrame(st.session_state["history"]))
+        hist_df = pd.DataFrame(st.session_state["history"])
+        st.dataframe(hist_df)
