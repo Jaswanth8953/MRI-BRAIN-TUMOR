@@ -7,270 +7,194 @@ import gdown
 import os
 from datetime import datetime
 
-# ---------- PAGE CONFIG ----------
+# ----------------- PAGE CONFIG -----------------
 st.set_page_config(
     page_title="Brain MRI Tumor Detection",
     page_icon="🧠",
     layout="wide",
 )
 
-# ---------- LIGHT HOSPITAL THEME ----------
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background-color: #F5F7FB;
-    }
-    .big-title {
-        font-size: 2.2rem;
-        font-weight: 700;
-        margin-bottom: 0.2rem;
-        color: #1F2937;
-    }
-    .subtitle {
-        font-size: 0.95rem;
-        color: #4B5563;
-        margin-bottom: 1rem;
-    }
-    .result-card {
-        padding: 1rem;
-        border-radius: 0.75rem;
-        background: #FFFFFF;
-        border: 1px solid #E5E7EB;
-        box-shadow: 0 4px 10px rgba(15, 23, 42, 0.08);
-    }
-    .sidebar-title {
-        font-weight: 600;
-        font-size: 1rem;
-        color: #111827;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ----------------- WHITE MEDICAL THEME -----------------
+st.markdown("""
+<style>
+.stApp { background-color: #F4F7FA; }
+.big-title { font-size: 2.2rem; font-weight: 700; color: #1F2937; }
+.subtitle { font-size: 1rem; color: #4B5563; }
+.result-card {
+    padding: 1rem;
+    border-radius: 10px;
+    background: white;
+    border: 1px solid #E5E7EB;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+}
+.sidebar-title { font-weight: 600; color: #1F2937; }
+</style>
+""", unsafe_allow_html=True)
 
-# ---------- CONFIG ----------
+# ----------------- CONFIG -----------------
 IMG_SIZE = (224, 224)
 
-# Your Google Drive IDs (already correct)
 EFFICIENTNET_ID = "1kfLjAHoGbYNBg12gU-vr9rCsnVX-kCFG"
-MOBILENET_ID   = "1ARZryz9H5Bc832iRs2DiPyEjBL5BuNKR"
+MOBILENET_ID    = "1ARZryz9H5Bc832iRs2DiPyEjBL5BuNKR"
 
 MODEL_CONFIG = {
     "EfficientNetB0": {
         "url": f"https://drive.google.com/uc?id={EFFICIENTNET_ID}",
-        "filename": "efficientnet_finetuned.h5",
-        "description": "High-capacity CNN, very strong overall accuracy.",
+        "filename": "efficientnet_finetuned.h5"
     },
     "MobileNetV3": {
         "url": f"https://drive.google.com/uc?id={MOBILENET_ID}",
-        "filename": "mobilenet_finetuned.h5",
-        "description": "Lightweight CNN, fast inference. Main model for this project.",
-    },
+        "filename": "mobilenet_finetuned.h5"
+    }
 }
 
-CLASS_NAMES = [
-    "glioma_tumor",
-    "meningioma_tumor",
-    "no_tumor",
-    "pituitary_tumor",
-]
+CLASS_NAMES = ["glioma_tumor", "meningioma_tumor", "no_tumor", "pituitary_tumor"]
 
-# ---------- SESSION STATE ----------
 if "history" not in st.session_state:
-    st.session_state["history"] = []  # list of dicts
+    st.session_state["history"] = []
 
-
-# ---------- MODEL HELPERS ----------
-def download_model_if_needed(model_name: str) -> str:
+# ----------------- HELPER: DOWNLOAD MODEL -----------------
+def download_model_if_needed(model_name):
     cfg = MODEL_CONFIG[model_name]
     os.makedirs("models", exist_ok=True)
-    model_path = os.path.join("models", cfg["filename"])
+    path = f"models/{cfg['filename']}"
+    if not os.path.exists(path):
+        with st.spinner(f"Downloading {model_name} weights…"):
+            gdown.download(cfg["url"], path, quiet=False)
+    return path
 
-    if not os.path.exists(model_path):
-        with st.spinner(f"Downloading {model_name} weights from Google Drive..."):
-            gdown.download(cfg["url"], model_path, quiet=False)
-
-    return model_path
-
-
+# ----------------- SAFE MODEL LOADER (FIXED MOBILENET) -----------------
 @st.cache_resource
-def load_model(model_name: str):
-    """Load model from local path (download from Drive if needed)."""
+def load_model(model_name):
     model_path = download_model_if_needed(model_name)
-    # compile=False to avoid needing original training config
-    model = tf.keras.models.load_model(model_path, compile=False)
-    # optional compile for metrics usage
+
+    # 1. Try normal load
     try:
-        model.compile(
-            optimizer="adam",
-            loss="categorical_crossentropy",
-            metrics=["accuracy"],
-        )
+        model = tf.keras.models.load_model(model_path, compile=False)
+        return model
     except Exception:
-        # some models may not need compile for inference
-        pass
-    return model
+        st.warning(f"Normal loading failed for {model_name}. Applying safe loader…")
 
+    # 2. SAFE LOADER for MobileNetV3
+    try:
+        tf.compat.v1.disable_eager_execution()
 
-def preprocess_image(image: Image.Image) -> np.ndarray:
-    """Same style as training: RGB -> resize -> /255."""
-    img = image.convert("RGB")
+        with tf.compat.v1.get_default_graph().as_default():
+            model = tf.keras.models.load_model(
+                model_path,
+                compile=False,
+                custom_objects={"Functional": tf.keras.Model}
+            )
+        return model
+
+    except Exception as e:
+        st.error(f"Model loading failed completely for {model_name}: {e}")
+        raise e
+
+# ----------------- PREDICTION -----------------
+def preprocess_image(img):
+    img = img.convert("RGB")
     img = img.resize(IMG_SIZE)
-    arr = np.array(img).astype("float32") / 255.0
-    arr = np.expand_dims(arr, axis=0)
-    return arr
+    x = np.array(img) / 255.0
+    return np.expand_dims(x, axis=0)
 
-
-def predict(model_name: str, image: Image.Image):
-    """Run inference with selected model."""
+def predict(model_name, img):
     model = load_model(model_name)
-    x = preprocess_image(image)
+    x = preprocess_image(img)
     preds = model.predict(x)[0]
-    idx = int(np.argmax(preds))
-    label = CLASS_NAMES[idx]
-    confidence = float(preds[idx])
-    return label, confidence, preds
+    idx = np.argmax(preds)
+    return CLASS_NAMES[idx], preds[idx], preds
 
-
-# ---------- SIDEBAR (TOOLBAR) ----------
+# ----------------- SIDEBAR -----------------
 with st.sidebar:
-    st.markdown('<div class="sidebar-title">Control Panel</div>', unsafe_allow_html=True)
+    st.markdown('<p class="sidebar-title">Control Panel</p>', unsafe_allow_html=True)
 
-    with st.expander("🕒 Session tools", expanded=True):
+    with st.expander("🕒 Session Tools", expanded=True):
         now = datetime.now()
-        st.write("**Date:**", now.strftime("%Y-%m-%d"))
-        st.write("**Time:**", now.strftime("%H:%M:%S"))
-        if st.button("🧹 Clear prediction history"):
+        st.write("Date:", now.strftime("%Y-%m-%d"))
+        st.write("Time:", now.strftime("%H:%M:%S"))
+        if st.button("Clear History"):
             st.session_state["history"] = []
             st.success("History cleared.")
 
     st.markdown("---")
 
-    # Default to MobileNetV3 (your main project model)
+    # DEFAULT: MobileNetV3 (your project model)
     model_choice = st.radio(
-        "Model selection",
-        options=list(MODEL_CONFIG.keys()),
-        index=1,  # 0 = EfficientNet, 1 = MobileNet
-        help="MobileNetV3 is the main model used in your project.",
+        "Select Model",
+        ["EfficientNetB0", "MobileNetV3"],
+        index=1
     )
 
-    st.markdown("**Model description**")
-    st.write(MODEL_CONFIG[model_choice]["description"])
-
     st.markdown("---")
-    st.caption("Developed by Archana & Jaswanth – Brain MRI Tumor Detection")
+    st.caption("Developed by Archana & Jaswanth")
 
+# ----------------- HEADER -----------------
+st.markdown('<p class="big-title">Brain MRI Tumor Detection</p>', unsafe_allow_html=True)
+st.markdown('<p class="subtitle">Upload an MRI scan and classify tumor type using MobileNetV3 / EfficientNetB0.</p>', unsafe_allow_html=True)
 
-# ---------- HEADER ----------
-st.markdown('<div class="big-title">Brain MRI Tumor Detection</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="subtitle">Upload a brain MRI image and obtain tumor predictions using your '
-    'trained MobileNetV3 / EfficientNetB0 models.</div>',
-    unsafe_allow_html=True,
-)
+# ----------------- TABS -----------------
+tab_pred, tab_details, tab_history = st.tabs(["🔮 Prediction", "ℹ️ Model Details", "🕑 History"])
 
-# ---------- TABS ----------
-tab_pred, tab_details, tab_history = st.tabs(
-    ["🔮 Prediction", "ℹ️ Model Details", "🕑 Prediction History"]
-)
-
-# ===== TAB 1: PREDICTION =====
+# ----------------- TAB 1: PREDICTION -----------------
 with tab_pred:
-    col_left, col_right = st.columns([1.2, 1])
+    left, right = st.columns([1.3, 1])
 
-    # LEFT: Image upload
-    with col_left:
-        uploaded_file = st.file_uploader(
-            "Upload MRI image (JPG / PNG)",
-            type=["jpg", "jpeg", "png"],
-        )
-        if uploaded_file is not None:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded MRI", use_column_width=True)
+    with left:
+        uploaded_file = st.file_uploader("Upload MRI (jpg/png)", type=["jpg", "jpeg", "png"])
+        if uploaded_file:
+            img = Image.open(uploaded_file)
+            st.image(img, caption="Uploaded MRI", use_column_width=True)
         else:
-            st.info("Please upload a brain MRI image to start.")
+            st.info("Please upload an MRI image.")
 
-    # RIGHT: Prediction card
-    with col_right:
-        st.markdown("#### Model Output")
+    with right:
+        st.markdown("### Model Output")
 
-        if uploaded_file is not None:
-            if st.button("Run prediction", use_container_width=True):
+        if uploaded_file:
+            if st.button("Run Prediction", use_container_width=True):
                 try:
-                    with st.spinner("Running inference..."):
-                        label, conf, probs = predict(model_choice, image)
+                    label, conf, probs = predict(model_choice, img)
 
-                    # Save to history
-                    st.session_state["history"].append(
-                        {
-                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "model": model_choice,
-                            "prediction": label,
-                            "confidence": round(conf * 100, 2),
-                        }
-                    )
+                    # Save history
+                    st.session_state["history"].append({
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "model": model_choice,
+                        "prediction": label,
+                        "confidence": round(conf * 100, 2)
+                    })
 
-                    # Result card
                     st.markdown('<div class="result-card">', unsafe_allow_html=True)
                     st.markdown(f"**Model:** {model_choice}")
-                    st.markdown(f"**Predicted class:** `{label}`")
+                    st.markdown(f"**Prediction:** `{label}`")
                     st.markdown(f"**Confidence:** `{conf * 100:.2f}%`")
                     st.markdown("</div>", unsafe_allow_html=True)
 
-                    # Probability table + bar chart
-                    prob_df = pd.DataFrame(
-                        {"Tumor Type": CLASS_NAMES, "Probability": probs}
-                    )
-                    prob_df["Probability (%)"] = (
-                        prob_df["Probability"] * 100
-                    ).round(2)
-                    prob_df = prob_df.set_index("Tumor Type")
+                    # Probability Table
+                    df = pd.DataFrame({"Tumor Type": CLASS_NAMES, "Probability": probs})
+                    df["Probability (%)"] = (df["Probability"] * 100).round(2)
+                    df = df.set_index("Tumor Type")
 
-                    st.markdown("##### Probability Distribution")
-                    st.dataframe(prob_df[["Probability (%)"]])
-                    st.bar_chart(prob_df["Probability"])
+                    st.markdown("#### Probability Distribution")
+                    st.dataframe(df[["Probability (%)"]])
+                    st.bar_chart(df["Probability"])
 
                 except Exception as e:
-                    st.error(
-                        f"Prediction failed for **{model_choice}**. "
-                        f"Technical error: {e}"
-                    )
+                    st.error(f"Error during prediction: {e}")
+
         else:
-            st.info("Prediction will appear here after you upload an image and click the button.")
+            st.info("Upload an MRI to generate prediction.")
 
-# ===== TAB 2: MODEL DETAILS =====
+# ----------------- TAB 2: MODEL DETAILS -----------------
 with tab_details:
-    st.markdown("### Model Details")
-    st.write(f"**Selected model:** `{model_choice}`")
-    st.write(MODEL_CONFIG[model_choice]["description"])
+    st.write("### Model Details")
+    st.write(f"Selected Model: **{model_choice}**")
+    st.write("Classes:", ", ".join(CLASS_NAMES))
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Input size**")
-        st.write(f"{IMG_SIZE[0]} × {IMG_SIZE[1]} RGB")
-        st.markdown("**Number of classes**")
-        st.write(len(CLASS_NAMES))
-        st.markdown("**Classes**")
-        st.write(", ".join(CLASS_NAMES))
-
-    with col2:
-        st.markdown("**Prediction pipeline**")
-        st.markdown(
-            """
-            1. Read uploaded MRI image.  
-            2. Convert to RGB, resize to 224×224, normalize to [0, 1].  
-            3. Forward pass through the selected CNN (MobileNetV3 / EfficientNetB0).  
-            4. Apply softmax over 4 tumor classes.  
-            5. Display highest-probability class and full distribution.  
-            """
-        )
-
-# ===== TAB 3: HISTORY =====
+# ----------------- TAB 3: HISTORY -----------------
 with tab_history:
-    st.markdown("### Prediction History (current session)")
+    st.write("### Prediction History")
     if len(st.session_state["history"]) == 0:
-        st.info("No predictions yet. Run a prediction in the first tab.")
+        st.info("No predictions yet.")
     else:
-        hist_df = pd.DataFrame(st.session_state["history"])
-        st.dataframe(hist_df)
+        st.dataframe(pd.DataFrame(st.session_state["history"]))
