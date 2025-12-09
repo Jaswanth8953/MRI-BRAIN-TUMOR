@@ -34,11 +34,9 @@ MODEL_CONFIG = {
 # ---------------------------------------------------------
 # NAVIGATION SYSTEM
 # ---------------------------------------------------------
-# Initialize session state for current page
 if 'current_page' not in st.session_state:
     st.session_state.current_page = "main"  # "main" or "verification"
 
-# Navigation buttons
 def show_navigation():
     col1, col2, col3 = st.columns([1, 2, 1])
     
@@ -74,7 +72,7 @@ CUSTOM_OBJECTS = {
 }
 
 # ---------------------------------------------------------
-# MODEL LOADER
+# MODEL LOADER (CACHED)
 # ---------------------------------------------------------
 @st.cache_resource
 def load_model(model_name):
@@ -91,6 +89,7 @@ def load_model(model_name):
             model = tf.keras.models.load_model(model_path, compile=False)
             return model
         else:
+            # MobileNetV3 with custom objects
             try:
                 model = tf.keras.models.load_model(
                     model_path,
@@ -99,6 +98,7 @@ def load_model(model_name):
                 )
                 return model
             except:
+                # Fallback if saved without custom_objects
                 model = tf.keras.models.load_model(
                     model_path,
                     compile=False,
@@ -106,7 +106,7 @@ def load_model(model_name):
                 )
                 return model
     except Exception as e:
-        st.error(f"Model load error: {str(e)[:100]}")
+        st.error(f"Model load error for {model_name}: {str(e)[:120]}")
         return None
 
 # ---------------------------------------------------------
@@ -124,11 +124,10 @@ def preprocess_image(uploaded_file):
 # ---------------------------------------------------------
 def verification_page():
     st.title("🔬 Model Verification Center")
-    st.markdown("Verify that you're using YOUR trained models from Google Drive")
+    st.markdown("Verify that you're using **YOUR trained models** from Google Drive")
     
     # Navigation
     current_page = show_navigation()
-    
     if current_page != "verification":
         return
     
@@ -138,14 +137,13 @@ def verification_page():
         st.header(f"🔍 Checking: {model_name}")
         
         col1, col2 = st.columns(2)
+        config = MODEL_CONFIG[model_name]
+        model_path = f"models/{config['filename']}"
         
         with col1:
             st.subheader("📁 YOUR Model File")
-            config = MODEL_CONFIG[model_name]
-            model_path = f"models/{config['filename']}"
             
             if os.path.exists(model_path):
-                # Get file info
                 file_size = os.path.getsize(model_path) / (1024*1024)
                 with open(model_path, 'rb') as f:
                     file_hash = hashlib.md5(f.read()).hexdigest()[:16]
@@ -155,28 +153,16 @@ def verification_page():
                 st.write(f"**Source:** [Your Google Drive]({config['url']})")
                 st.write(f"**MD5 Hash:** `{file_hash}...`")
                 
-                # Try to load the model
-                try:
-                    if model_name == "EfficientNetB0":
-                        model = tf.keras.models.load_model(model_path, compile=False)
-                    else:
-                        model = tf.keras.models.load_model(
-                            model_path,
-                            compile=False,
-                            custom_objects=CUSTOM_OBJECTS
-                        )
-                    
+                # Try to load via cached loader
+                model = load_model(model_name)
+                if model is not None:
                     st.success("✅ Loads as complete Keras model!")
-                    
-                    # Test prediction
                     test_input = np.random.random((1, 224, 224, 3)).astype('float32') / 255.0
                     prediction = model.predict(test_input, verbose=0)
                     st.write(f"**Test Output Shape:** {prediction.shape}")
                     st.write(f"**Sum of probabilities:** {prediction.sum():.6f}")
-                    
-                except Exception as e:
-                    st.error(f"❌ Cannot load: {str(e)[:100]}")
-                    
+                else:
+                    st.error("❌ Could not load model")
             else:
                 st.warning("⚠️ File not downloaded yet")
         
@@ -184,6 +170,7 @@ def verification_page():
             st.subheader("🔄 Comparison with Standard Model")
             
             # Load standard model
+            standard = None
             try:
                 if model_name == "EfficientNetB0":
                     standard = tf.keras.applications.EfficientNetB0(weights='imagenet')
@@ -195,40 +182,26 @@ def verification_page():
                 st.write(f"- Layers: {len(standard.layers)}")
                 st.write(f"- Classes: 1000 (ImageNet)")
                 st.write(f"- Weights: Pre-trained on ImageNet")
-                
             except Exception as e:
-                st.error(f"Cannot load standard: {str(e)[:50]}")
-                standard = None
+                st.error(f"Cannot load standard: {str(e)[:80]}")
             
-            # Try to compare with YOUR model
+            # Compare with YOUR model
             if os.path.exists(model_path):
-                try:
-                    if model_name == "EfficientNetB0":
-                        your_model = tf.keras.models.load_model(model_path, compile=False)
-                    else:
-                        your_model = tf.keras.models.load_model(
-                            model_path,
-                            compile=False,
-                            custom_objects=CUSTOM_OBJECTS
-                        )
-                    
+                model = load_model(model_name)
+                if model is not None:
                     st.write(f"\n**YOUR {model_name}:**")
-                    st.write(f"- Layers: {len(your_model.layers)}")
-                    st.write(f"- Classes: {your_model.layers[-1].units}")
-                    
-                    # CRITICAL VERIFICATION
-                    if your_model.layers[-1].units == 4:
-                        st.success("✅ **YOUR CUSTOM TRAINED MODEL!**")
-                        st.write("Proof: Has 4 tumor classes (not 1000 ImageNet classes)")
-                    elif standard and len(your_model.layers) > len(standard.layers):
-                        st.success("✅ Has custom head (more layers)")
-                    elif standard and len(your_model.layers) == len(standard.layers):
-                        st.warning("⚠️ Same layers as standard")
-                    else:
-                        st.error("❌ Unexpected architecture")
-                        
-                except:
-                    st.write("(Cannot inspect model structure)")
+                    st.write(f"- Layers: {len(model.layers)}")
+                    try:
+                        units = model.layers[-1].units
+                        st.write(f"- Classes: {units}")
+                        if units == 4:
+                            st.success("✅ **YOUR CUSTOM TRAINED MODEL (4 tumor classes)**")
+                        else:
+                            st.warning(f"⚠️ Final layer has {units} units (not 4)")
+                    except:
+                        st.info("ℹ️ Could not read final layer units")
+                else:
+                    st.error("❌ Could not inspect model (load failed)")
         
         st.markdown("---")
     
@@ -240,22 +213,19 @@ def verification_page():
     with col_sum1:
         st.info("""
         **✅ EfficientNetB0:**
-        - **YOUR custom-trained model**
+        - YOUR custom-trained model
         - 4 tumor classes (not 1000)
-        - Working perfectly
-        - Use this for predictions
+        - Recommended for predictions
         """)
     
     with col_sum2:
-        st.warning("""
-        **⚠️ MobileNetV3-Large:**
-        - Loading issues
-        - May need reconstruction
-        - Use EfficientNet instead
-        - Or retrain with proper saving
+        st.info("""
+        **ℹ️ MobileNetV3-Large:**
+        - Experimental support
+        - Depends on how it was saved
+        - EfficientNetB0 is preferred
         """)
     
-    # Navigation at bottom
     st.markdown("---")
     if st.button("🏠 Go Back to MRI Analysis", use_container_width=True, type="primary"):
         st.session_state.current_page = "main"
@@ -272,7 +242,10 @@ def main_page():
         st.markdown("### 🧠")
     
     with col_title:
-        st.markdown("<h1 style='text-align:center;'>Brain MRI Tumor Detection</h1>", unsafe_allow_html=True)
+        st.markdown(
+            "<h1 style='text-align:center;'>Brain MRI Tumor Detection</h1>",
+            unsafe_allow_html=True
+        )
     
     with col_nav:
         if st.button("🔍 Verify Models", use_container_width=True):
@@ -296,39 +269,45 @@ def main_page():
         st.subheader("🔍 Model Status")
         
         for model_name in ["EfficientNetB0", "MobileNetV3-Large"]:
-            model_path = f"models/{MODEL_CONFIG[model_name]['filename']}"
+            config = MODEL_CONFIG[model_name]
+            model_path = f"models/{config['filename']}"
             
             if os.path.exists(model_path):
                 file_size = os.path.getsize(model_path) / (1024*1024)
                 
+                model = None
                 if model_name == "EfficientNetB0":
-                    try:
-                        model = tf.keras.models.load_model(model_path, compile=False)
-                        if model.layers[-1].units == 4:
-                            st.success(f"✅ {model_name}: YOUR model")
-                        else:
-                            st.error(f"❌ {model_name}: {model.layers[-1].units} classes")
-                    except:
-                        st.info(f"📦 {model_name}: {file_size:.1f} MB")
+                    model = load_model(model_name)
+                    if model is not None:
+                        try:
+                            if model.layers[-1].units == 4:
+                                st.success(f"✅ {model_name}: YOUR 4-class model")
+                            else:
+                                st.warning(f"⚠️ {model_name}: Final layer = {model.layers[-1].units} units")
+                        except:
+                            st.info(f"📦 {model_name}: {file_size:.1f} MB (couldn't read final layer)")
+                    else:
+                        st.error(f"❌ {model_name}: Load failed")
                 else:
-                    st.warning(f"⚠️ {model_name}: {file_size:.1f} MB")
+                    # For MobileNet, treat as experimental
+                    st.info(f"📦 {model_name}: {file_size:.1f} MB (experimental)")
             else:
-                st.info(f"📥 {model_name}: Not downloaded")
+                st.info(f"📥 {model_name}: Not downloaded yet")
         
         st.markdown("---")
         
         if model_choice == "EfficientNetB0":
             st.success("""
             **✅ RECOMMENDED**
-            - YOUR custom-trained
+            - YOUR custom-trained model
             - 4 tumor classes
-            - Working perfectly
+            - Stable and verified
             """)
         else:
             st.warning("""
             **⚠️ EXPERIMENTAL**
-            - Loading issues
-            - Use EfficientNet
+            - MobileNetV3 support depends on saving format
+            - EfficientNetB0 is recommended
             """)
     
     # Main content
@@ -342,7 +321,7 @@ def main_page():
         
         with col1:
             arr, img_show = preprocess_image(uploaded_file)
-            st.image(img_show, caption="Uploaded MRI", width='stretch')
+            st.image(img_show, caption="Uploaded MRI", use_column_width=True)
             
             with st.expander("🔧 Processing Details"):
                 st.write(f"**Model:** {model_choice}")
@@ -361,12 +340,10 @@ def main_page():
                         with st.spinner("Analyzing MRI..."):
                             predictions = model.predict(arr, verbose=0)[0]
                         
-                        # Get results
-                        predicted_idx = np.argmax(predictions)
+                        predicted_idx = int(np.argmax(predictions))
                         predicted_class = CLASS_NAMES[predicted_idx]
-                        confidence = predictions[predicted_idx] * 100
+                        confidence = float(predictions[predicted_idx] * 100)
                         
-                        # Store in session state
                         st.session_state.last_prediction = {
                             'predictions': predictions,
                             'predicted_class': predicted_class,
@@ -391,23 +368,28 @@ def main_page():
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Progress bar
+                # Progress bar for main confidence
                 st.progress(float(pred_data['confidence']/100), text=f"Confidence Level: {pred_data['confidence']:.1f}%")
                 
                 # All probabilities
                 st.markdown("#### 📋 All Probabilities:")
-                for i in range(4):
-                    prob = pred_data['predictions'][i] * 100
+                
+                predictions = pred_data['predictions']
+                predicted_idx = int(np.argmax(predictions))  # ✅ always defined here
+                
+                for i in range(len(CLASS_NAMES)):
+                    prob = float(predictions[i] * 100)
                     col_left, col_right = st.columns([3, 7])
                     
                     with col_left:
+                        label = CLASS_NAMES[i].replace('_', ' ').title()
                         if i == predicted_idx:
-                            st.markdown(f"**▶ {CLASS_NAMES[i].replace('_', ' ').title()}**")
+                            st.markdown(f"**▶ {label}**")
                         else:
-                            st.write(CLASS_NAMES[i].replace('_', ' ').title())
+                            st.write(label)
                     
                     with col_right:
-                        st.progress(float(pred_data['predictions'][i]), text=f"{prob:.1f}%")
+                        st.progress(float(predictions[i]), text=f"{prob:.1f}%")
                 
                 # Interpretation
                 st.markdown("---")
@@ -433,10 +415,10 @@ def main_page():
                     """)
             
             elif 'last_prediction' in st.session_state:
-                st.info("👈 Run prediction with current model")
+                st.info("👈 Run prediction with the selected model to update results")
             
             else:
-                st.info("""
+                st.info(f"""
                 ## 📊 Ready to Analyze
                 
                 Click **"Run Prediction"** to:
@@ -445,7 +427,7 @@ def main_page():
                 3. View tumor classification
                 
                 **Current Model:** {model_choice}
-                """.format(model_choice=model_choice))
+                """)
     
     else:
         # Welcome message
@@ -459,11 +441,11 @@ def main_page():
         4. **View** AI analysis results
         
         **Recommended Model:** **EfficientNetB0**
-        - ✅ **YOUR custom-trained model**
-        - ✅ **4 tumor classes** (glioma, meningioma, no_tumor, pituitary)
-        - ✅ **Working perfectly**
+        - ✅ YOUR custom-trained model
+        - ✅ 4 tumor classes (glioma, meningioma, no_tumor, pituitary)
+        - ✅ Stable and verified
         
-        **Click "Verify Models" in the top right to check your models.**
+        Use **"Verify Models"** to confirm your model files.
         """)
     
     # Footer
@@ -482,7 +464,6 @@ def main_page():
 # MAIN APP ROUTER
 # ---------------------------------------------------------
 def main():
-    # Check current page
     if st.session_state.current_page == "verification":
         verification_page()
     else:
