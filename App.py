@@ -18,6 +18,9 @@ st.set_page_config(
     page_icon="🧠"
 )
 
+# ---------------------------------------------------------
+# CLASS NAMES & MODEL CONFIG
+# ---------------------------------------------------------
 CLASS_NAMES = ["glioma_tumor", "meningioma_tumor", "no_tumor", "pituitary_tumor"]
 
 MODEL_CONFIG = {
@@ -72,18 +75,27 @@ CUSTOM_OBJECTS = {
 }
 
 # ---------------------------------------------------------
+# PREPROCESS IMPORTS FOR BOTH MODELS
+# ---------------------------------------------------------
+from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
+from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as mobilenet_preprocess
+
+# ---------------------------------------------------------
 # MODEL LOADER (CACHED)
 # ---------------------------------------------------------
 @st.cache_resource
 def load_model(model_name):
+    """Download (if needed) and load the selected model from Google Drive."""
     config = MODEL_CONFIG[model_name]
     os.makedirs("models", exist_ok=True)
     model_path = f"models/{config['filename']}"
     
+    # Download if not present
     if not os.path.exists(model_path):
-        with st.spinner(f"📥 Downloading {model_name}..."):
+        with st.spinner(f"📥 Downloading {model_name} from Google Drive..."):
             gdown.download(config["url"], model_path, quiet=False)
     
+    # Try loading
     try:
         if model_name == "EfficientNetB0":
             model = tf.keras.models.load_model(model_path, compile=False)
@@ -97,7 +109,7 @@ def load_model(model_name):
                     custom_objects=CUSTOM_OBJECTS
                 )
                 return model
-            except:
+            except Exception:
                 # Fallback if saved without custom_objects
                 model = tf.keras.models.load_model(
                     model_path,
@@ -106,17 +118,28 @@ def load_model(model_name):
                 )
                 return model
     except Exception as e:
-        st.error(f"Model load error for {model_name}: {str(e)[:120]}")
+        st.error(f"Model load error for {model_name}: {str(e)[:150]}")
         return None
 
 # ---------------------------------------------------------
-# PREPROCESS IMAGE
+# PREPROCESS IMAGE (MATCHES TRAINING PIPELINE)
 # ---------------------------------------------------------
-def preprocess_image(uploaded_file):
+def preprocess_image(uploaded_file, model_choice):
+    """
+    Preprocess uploaded MRI according to the model's training preprocessing.
+    EfficientNetB0  -> effnet_preprocess  ([-1, 1] scaling)
+    MobileNetV3     -> mobilenet_preprocess (its own formula)
+    """
     img = Image.open(uploaded_file).convert("RGB")
     display_img = img.copy()
-    img = img.resize((224, 224))
-    arr = np.array(img).astype('float32') / 255.0
+    img = img.resize((224, 224))  # same as training
+    arr = np.array(img).astype('float32')  # [0, 255]
+
+    if model_choice == "EfficientNetB0":
+        arr = effnet_preprocess(arr)
+    else:
+        arr = mobilenet_preprocess(arr)
+
     return np.expand_dims(arr, axis=0), display_img
 
 # ---------------------------------------------------------
@@ -124,9 +147,9 @@ def preprocess_image(uploaded_file):
 # ---------------------------------------------------------
 def verification_page():
     st.title("🔬 Model Verification Center")
-    st.markdown("Verify that you're using **YOUR trained models** from Google Drive")
+    st.markdown("Verify that you're using **YOUR trained models** from Google Drive.")
     
-    # Navigation
+    # Top navigation
     current_page = show_navigation()
     if current_page != "verification":
         return
@@ -140,6 +163,7 @@ def verification_page():
         config = MODEL_CONFIG[model_name]
         model_path = f"models/{config['filename']}"
         
+        # ----- LEFT: FILE & HASH -----
         with col1:
             st.subheader("📁 YOUR Model File")
             
@@ -150,26 +174,25 @@ def verification_page():
                 
                 st.success(f"✅ File exists: {file_size:.1f} MB")
                 st.write(f"**Location:** `{model_path}`")
-                st.write(f"**Source:** [Your Google Drive]({config['url']})")
-                st.write(f"**MD5 Hash:** `{file_hash}...`")
+                st.write(f"**Source:** [Your Google Drive link]({config['url']})")
+                st.write(f"**MD5 Hash (first 16 chars):** `{file_hash}...`")
                 
-                # Try to load via cached loader
                 model = load_model(model_name)
                 if model is not None:
                     st.success("✅ Loads as complete Keras model!")
-                    test_input = np.random.random((1, 224, 224, 3)).astype('float32') / 255.0
+                    test_input = np.random.random((1, 224, 224, 3)).astype('float32')
                     prediction = model.predict(test_input, verbose=0)
                     st.write(f"**Test Output Shape:** {prediction.shape}")
                     st.write(f"**Sum of probabilities:** {prediction.sum():.6f}")
                 else:
-                    st.error("❌ Could not load model")
+                    st.error("❌ Could not load model. Check file or link.")
             else:
-                st.warning("⚠️ File not downloaded yet")
+                st.warning("⚠️ Model file not downloaded yet.")
         
+        # ----- RIGHT: COMPARE WITH STANDARD -----
         with col2:
             st.subheader("🔄 Comparison with Standard Model")
             
-            # Load standard model
             standard = None
             try:
                 if model_name == "EfficientNetB0":
@@ -181,11 +204,10 @@ def verification_page():
                 
                 st.write(f"- Layers: {len(standard.layers)}")
                 st.write(f"- Classes: 1000 (ImageNet)")
-                st.write(f"- Weights: Pre-trained on ImageNet")
+                st.write("- Weights: Pre-trained on ImageNet")
             except Exception as e:
-                st.error(f"Cannot load standard: {str(e)[:80]}")
+                st.error(f"Cannot load standard reference model: {str(e)[:80]}")
             
-            # Compare with YOUR model
             if os.path.exists(model_path):
                 model = load_model(model_name)
                 if model is not None:
@@ -193,15 +215,15 @@ def verification_page():
                     st.write(f"- Layers: {len(model.layers)}")
                     try:
                         units = model.layers[-1].units
-                        st.write(f"- Classes: {units}")
+                        st.write(f"- Final layer units: {units}")
                         if units == 4:
-                            st.success("✅ **YOUR CUSTOM TRAINED MODEL (4 tumor classes)**")
+                            st.success("✅ Looks like your 4-class tumor model.")
                         else:
-                            st.warning(f"⚠️ Final layer has {units} units (not 4)")
-                    except:
-                        st.info("ℹ️ Could not read final layer units")
+                            st.warning("⚠️ Final layer is not 4 units. Check training code.")
+                    except Exception:
+                        st.info("ℹ️ Could not read final layer units.")
                 else:
-                    st.error("❌ Could not inspect model (load failed)")
+                    st.error("❌ Could not inspect model: load failed.")
         
         st.markdown("---")
     
@@ -212,18 +234,18 @@ def verification_page():
     
     with col_sum1:
         st.info("""
-        **✅ EfficientNetB0:**
-        - YOUR custom-trained model
-        - 4 tumor classes (not 1000)
+        **✅ EfficientNetB0**
+        - Custom-trained with 4 tumor classes
+        - Uses EfficientNet preprocessing
         - Recommended for predictions
         """)
     
     with col_sum2:
         st.info("""
-        **ℹ️ MobileNetV3-Large:**
-        - Experimental support
-        - Depends on how it was saved
-        - EfficientNetB0 is preferred
+        **ℹ️ MobileNetV3-Large**
+        - Custom-trained with MobileNet preprocessing
+        - Lighter and faster
+        - Can be used experimentally
         """)
     
     st.markdown("---")
@@ -235,7 +257,7 @@ def verification_page():
 # MAIN PAGE (MRI ANALYSIS)
 # ---------------------------------------------------------
 def main_page():
-    # Header with navigation
+    # Header row
     col_logo, col_title, col_nav = st.columns([1, 3, 1])
     
     with col_logo:
@@ -252,7 +274,7 @@ def main_page():
             st.session_state.current_page = "verification"
             st.rerun()
     
-    st.markdown("**Using YOUR trained models from Google Drive**")
+    st.markdown("**Using YOUR trained EfficientNetB0 & MobileNetV3 models from Google Drive**")
     st.markdown("---")
     
     # Sidebar
@@ -275,22 +297,20 @@ def main_page():
             if os.path.exists(model_path):
                 file_size = os.path.getsize(model_path) / (1024*1024)
                 
-                model = None
                 if model_name == "EfficientNetB0":
                     model = load_model(model_name)
                     if model is not None:
                         try:
                             if model.layers[-1].units == 4:
-                                st.success(f"✅ {model_name}: YOUR 4-class model")
+                                st.success(f"✅ {model_name}: 4-class custom model")
                             else:
                                 st.warning(f"⚠️ {model_name}: Final layer = {model.layers[-1].units} units")
-                        except:
+                        except Exception:
                             st.info(f"📦 {model_name}: {file_size:.1f} MB (couldn't read final layer)")
                     else:
                         st.error(f"❌ {model_name}: Load failed")
                 else:
-                    # For MobileNet, treat as experimental
-                    st.info(f"📦 {model_name}: {file_size:.1f} MB (experimental)")
+                    st.info(f"📦 {model_name}: {file_size:.1f} MB (custom MobileNetV3 model)")
             else:
                 st.info(f"📥 {model_name}: Not downloaded yet")
         
@@ -299,18 +319,18 @@ def main_page():
         if model_choice == "EfficientNetB0":
             st.success("""
             **✅ RECOMMENDED**
-            - YOUR custom-trained model
-            - 4 tumor classes
+            - Your EfficientNetB0 tumor classifier
+            - 4 classes: glioma, meningioma, no_tumor, pituitary
             - Stable and verified
             """)
         else:
             st.warning("""
             **⚠️ EXPERIMENTAL**
-            - MobileNetV3 support depends on saving format
-            - EfficientNetB0 is recommended
+            - MobileNetV3-Large custom model
+            - Make sure preprocessing & training match
             """)
     
-    # Main content
+    # Main content: upload & prediction
     uploaded_file = st.file_uploader(
         "📤 Upload MRI Image (JPG/PNG)",
         type=["jpg", "jpeg", "png"]
@@ -319,16 +339,22 @@ def main_page():
     if uploaded_file:
         col1, col2 = st.columns(2)
         
+        # ----- LEFT: IMAGE & DETAILS -----
         with col1:
-            arr, img_show = preprocess_image(uploaded_file)
+            arr, img_show = preprocess_image(uploaded_file, model_choice)
             st.image(img_show, caption="Uploaded MRI", use_column_width=True)
             
             with st.expander("🔧 Processing Details"):
                 st.write(f"**Model:** {model_choice}")
-                st.write(f"**Input Shape:** {arr.shape}")
-                st.write(f"**Pixel Range:** [{arr.min():.3f}, {arr.max():.3f}]")
-                st.write("**Preprocessing:** Simple [0, 1] normalization")
+                st.write(f"**Input Shape to model:** {arr.shape}")
+                st.write(f"**Min value:** {arr.min():.3f}")
+                st.write(f"**Max value:** {arr.max():.3f}")
+                if model_choice == "EfficientNetB0":
+                    st.write("**Preprocessing:** EfficientNetB0 `preprocess_input`")
+                else:
+                    st.write("**Preprocessing:** MobileNetV3 `preprocess_input`")
         
+        # ----- RIGHT: ANALYSIS & RESULTS -----
         with col2:
             st.subheader("🔍 Analysis Results")
             
@@ -353,13 +379,13 @@ def main_page():
                         
                         st.rerun()
                     else:
-                        st.error("❌ Failed to load model!")
+                        st.error("❌ Failed to load model! Check Verification page.")
             
-            # Display previous results if available
+            # Display last prediction if available
             if 'last_prediction' in st.session_state and st.session_state.last_prediction['model_used'] == model_choice:
                 pred_data = st.session_state.last_prediction
                 
-                # Prediction card
+                # Main prediction card
                 st.markdown(f"""
                 <div style='background:#eef6ff; padding:20px; border-radius:10px; border-left:6px solid #3b82f6; margin:20px 0;'>
                     <h3 style='margin-top:0; color:#1e40af;'>{pred_data['predicted_class'].replace('_', ' ').title()}</h3>
@@ -368,14 +394,16 @@ def main_page():
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Progress bar for main confidence
-                st.progress(float(pred_data['confidence']/100), text=f"Confidence Level: {pred_data['confidence']:.1f}%")
+                # Confidence progress bar
+                st.progress(
+                    float(pred_data['confidence'] / 100.0),
+                    text=f"Confidence Level: {pred_data['confidence']:.1f}%"
+                )
                 
                 # All probabilities
                 st.markdown("#### 📋 All Probabilities:")
-                
                 predictions = pred_data['predictions']
-                predicted_idx = int(np.argmax(predictions))  # ✅ always defined here
+                predicted_idx = int(np.argmax(predictions))  # always defined
                 
                 for i in range(len(CLASS_NAMES)):
                     prob = float(predictions[i] * 100)
@@ -391,31 +419,31 @@ def main_page():
                     with col_right:
                         st.progress(float(predictions[i]), text=f"{prob:.1f}%")
                 
-                # Interpretation
+                # Interpretation text
                 st.markdown("---")
-                st.markdown("#### 💡 Medical Interpretation:")
+                st.markdown("#### 💡 Medical Interpretation (Not a medical diagnosis):")
                 
                 if pred_data['predicted_class'] == "no_tumor":
                     st.success("""
-                    **✅ Normal MRI Scan**
-                    - No visible tumor indicators
-                    - Consider regular neurological check-ups
+                    **✅ Model Suggestion: No Tumor**
+                    - No strong tumor signature detected
+                    - Regular medical check-ups are still recommended
                     """)
                 elif pred_data['confidence'] > 80:
                     st.warning(f"""
-                    **⚠️ High Confidence Detection**
+                    **⚠️ Model Suggestion: High Confidence Tumor Detection**
                     - Strong indicators of **{pred_data['predicted_class'].replace('_', ' ')}**
-                    - Urgent medical consultation recommended
+                    - Urgent consultation with a radiologist is recommended
                     """)
                 else:
                     st.info(f"""
-                    **📊 Moderate Confidence**
-                    - Possible **{pred_data['predicted_class'].replace('_', ' ')}**
-                    - Medical evaluation advised
+                    **📊 Model Suggestion: Possible Tumor**
+                    - Model leans towards **{pred_data['predicted_class'].replace('_', ' ')}**
+                    - Clinical evaluation & expert opinion required
                     """)
             
             elif 'last_prediction' in st.session_state:
-                st.info("👈 Run prediction with the selected model to update results")
+                st.info("👈 Run prediction with the selected model to update the results.")
             
             else:
                 st.info(f"""
@@ -424,28 +452,25 @@ def main_page():
                 Click **"Run Prediction"** to:
                 1. Load the selected model
                 2. Analyze the MRI scan
-                3. View tumor classification
+                3. View the tumor classification
                 
                 **Current Model:** {model_choice}
                 """)
     
     else:
-        # Welcome message
+        # Welcome message when no file is uploaded
         st.info("""
         ## 👋 Welcome to Brain Tumor Classifier
         
-        **How to use:**
+        **How to use this app:**
         1. **Upload** an MRI brain scan (JPG/PNG)
-        2. **Select** a model from sidebar
+        2. **Choose** a model in the sidebar (EfficientNetB0 recommended)
         3. **Click** "Run Prediction"
-        4. **View** AI analysis results
+        4. **Review** the predicted tumor type and confidence
         
         **Recommended Model:** **EfficientNetB0**
-        - ✅ YOUR custom-trained model
+        - ✅ Trained with EfficientNet preprocessing
         - ✅ 4 tumor classes (glioma, meningioma, no_tumor, pituitary)
-        - ✅ Stable and verified
-        
-        Use **"Verify Models"** to confirm your model files.
         """)
     
     # Footer
@@ -455,7 +480,10 @@ def main_page():
     with footer_col1:
         st.caption("🧠 **Brain Tumor Classifier** | Using YOUR trained models")
         if uploaded_file and 'last_prediction' in st.session_state:
-            st.caption(f"Last prediction: {st.session_state.last_prediction['predicted_class'].replace('_', ' ').title()}")
+            st.caption(
+                "Last prediction: "
+                f"{st.session_state.last_prediction['predicted_class'].replace('_', ' ').title()}"
+            )
     
     with footer_col2:
         st.caption(f"**Current Model:** {model_choice}")
@@ -480,25 +508,26 @@ if __name__ == "__main__":
 # ---------------------------------------------------------
 st.markdown("""
 <style>
-    /* Navigation buttons */
-    div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column;"] > div[data-testid="stVerticalBlock"] {
+    /* Navigation buttons spacing */
+    div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column;"]
+        > div[data-testid="stVerticalBlock"] {
         gap: 0.5rem;
     }
     
-    /* Better spacing */
+    /* Better spacing for main container */
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
     }
     
-    /* Custom card styling */
+    /* Custom expander styling */
     div[data-testid="stExpander"] details {
         border: 1px solid #e2e8f0;
         border-radius: 8px;
         margin: 10px 0;
     }
     
-    /* Button hover effects */
+    /* Button hover effect */
     .stButton > button:hover {
         transform: translateY(-2px);
         transition: all 0.3s;
